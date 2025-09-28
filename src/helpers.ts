@@ -49,7 +49,7 @@ export function hasFrontmatterKeyRaw(data: string) {
     return false;
   }
 
-  if (!match[1].contains(frontmatterKey)) {
+  if (!match[1].includes(frontmatterKey)) {
     return false;
   }
 

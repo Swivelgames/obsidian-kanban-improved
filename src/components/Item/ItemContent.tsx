@@ -162,7 +162,7 @@ export function Tags({
             }}
             key={i}
             className={`tag ${c('item-tag')} ${
-              searchQuery && tag.toLocaleLowerCase().contains(searchQuery) ? 'is-search-match' : ''
+              searchQuery && tag.toLocaleLowerCase().includes(searchQuery) ? 'is-search-match' : ''
             }`}
             style={
               tagColor && {
