@@ -184,10 +184,11 @@ export class StateManager {
     const [state, setState] = useState(this.state);
 
     useEffect(() => {
-      this.stateReceivers.push((state) => setState(state));
+      const receiver = (state: Board) => setState(state);
+      this.stateReceivers.push(receiver);
       setState(this.state);
       return () => {
-        this.stateReceivers.remove(setState);
+        this.stateReceivers.remove(receiver);
       };
     }, []);
 
