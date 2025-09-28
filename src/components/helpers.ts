@@ -1,5 +1,5 @@
 import update from 'immutability-helper';
-import { App, MarkdownView, TFile, moment } from 'obsidian';
+import { App, MarkdownView, TFile, TFolder, moment, normalizePath } from 'obsidian';
 import Preact, { Dispatch, RefObject, useEffect } from 'preact/compat';
 import { StateUpdater, useMemo } from 'preact/hooks';
 import { StateManager } from 'src/StateManager';
@@ -119,9 +119,17 @@ export async function applyTemplate(stateManager: StateManager, templatePath?: s
     : null;
 
   if (templateFile && templateFile instanceof TFile) {
-    const activeView = app.workspace.getActiveViewOfType(MarkdownView);
+    let activeView = stateManager.app.workspace.getActiveViewOfType(MarkdownView);
 
     try {
+      if (!activeView) {
+        activeView = await waitForActiveMarkdownView(stateManager.app);
+      }
+
+      if (!activeView) {
+        throw new Error('Unable to locate an active markdown view to apply the template.');
+      }
+
       // Force the view to source mode, if needed
       if (activeView?.getMode() !== 'source') {
         await activeView.setState(
@@ -133,33 +141,67 @@ export async function applyTemplate(stateManager: StateManager, templatePath?: s
         );
       }
 
-      const { templatesEnabled, templaterEnabled, templatesPlugin, templaterPlugin } =
-        getTemplatePlugins(stateManager.app);
+      const {
+        templatesEnabled,
+        templaterEnabled,
+        templatesPlugin,
+        templaterPlugin,
+      } = getTemplatePlugins(stateManager.app);
 
       const templateContent = await stateManager.app.vault.read(templateFile);
 
       // If both plugins are enabled, attempt to detect templater first
       if (templatesEnabled && templaterEnabled) {
         if (templaterDetectRegex.test(templateContent)) {
-          return await templaterPlugin.append_template_to_active_file(templateFile);
+          const applied = await tryApplyTemplaterTemplate(templaterPlugin, templateFile);
+
+          if (applied) {
+            return;
+          }
         }
 
-        return await templatesPlugin.instance.insertTemplate(templateFile);
+        const applied = await tryApplyTemplatesPlugin(
+          templatesPlugin,
+          templateFile,
+          activeView
+        );
+
+        if (applied) {
+          return;
+        }
+
+        const templaterApplied = await tryApplyTemplaterTemplate(
+          templaterPlugin,
+          templateFile
+        );
+
+        if (templaterApplied) {
+          return;
+        }
+      } else if (templatesEnabled) {
+        const applied = await tryApplyTemplatesPlugin(
+          templatesPlugin,
+          templateFile,
+          activeView
+        );
+
+        if (applied) {
+          return;
+        }
+      } else if (templaterEnabled) {
+        const applied = await tryApplyTemplaterTemplate(templaterPlugin, templateFile);
+
+        if (applied) {
+          return;
+        }
       }
 
-      if (templatesEnabled) {
-        return await templatesPlugin.instance.insertTemplate(templateFile);
-      }
+      // No template plugins enabled or all integrations failed; append the template directly.
+      const activeFile = stateManager.app.workspace.getActiveFile();
 
-      if (templaterEnabled) {
-        return await templaterPlugin.append_template_to_active_file(templateFile);
+      if (activeFile) {
+        await stateManager.app.vault.modify(activeFile, templateContent);
       }
-
-      // No template plugins enabled so we can just append the template to the doc
-      await stateManager.app.vault.modify(
-        stateManager.app.workspace.getActiveFile(),
-        templateContent
-      );
     } catch (e) {
       console.error(e);
       stateManager.setError(e);
@@ -200,28 +242,180 @@ export function escapeRegExpStr(str: string) {
 }
 
 export function getTemplatePlugins(app: App) {
-  const templatesPlugin = (app as any).internalPlugins.plugins.templates;
-  const templatesEnabled = templatesPlugin.enabled;
-  const templaterPlugin = (app as any).plugins.plugins['templater-obsidian'];
-  const templaterEnabled = (app as any).plugins.enabledPlugins.has('templater-obsidian');
-  const templaterEmptyFileTemplate =
-    templaterPlugin &&
-    (this.app as any).plugins.plugins['templater-obsidian'].settings?.empty_file_template;
+  const internalPlugins = (app as any).internalPlugins;
+  const appPlugins = (app as any).plugins;
+
+  const enabledTemplatesPlugin = internalPlugins?.getEnabledPluginById?.('templates');
+  const templatesPlugin =
+    enabledTemplatesPlugin ?? internalPlugins?.getPluginById?.('templates') ?? internalPlugins?.plugins?.templates;
+  const templatesEnabled = Boolean(
+    enabledTemplatesPlugin ?? templatesPlugin?.enabled ?? internalPlugins?.enabledPlugins?.has?.('templates')
+  );
+  const templatesInstance = templatesPlugin?.instance ?? templatesPlugin;
+
+  const templaterPlugin =
+    appPlugins?.getPlugin?.('templater-obsidian') ?? appPlugins?.plugins?.['templater-obsidian'] ?? null;
+  const templaterEnabled = Boolean(
+    appPlugins?.enabledPlugins?.has?.('templater-obsidian') ?? templaterPlugin?.enabled
+  );
+  const templaterApi = templaterPlugin?.templater ?? templaterPlugin?.api ?? templaterPlugin ?? null;
 
   const templateFolder = templatesEnabled
-    ? templatesPlugin.instance.options.folder
-    : templaterPlugin
-      ? templaterPlugin.settings.template_folder
-      : undefined;
+    ? templatesInstance?.options?.folder ?? templatesInstance?.options?.templateFolder
+    : templaterPlugin?.settings?.template_folder ?? templaterPlugin?.options?.template_folder;
 
   return {
-    templatesPlugin,
+    templatesPlugin: templatesInstance,
     templatesEnabled,
-    templaterPlugin: templaterPlugin?.templater,
+    templaterPlugin: templaterApi,
     templaterEnabled,
-    templaterEmptyFileTemplate,
+    templaterEmptyFileTemplate: templaterPlugin?.settings?.empty_file_template,
     templateFolder,
   };
+}
+
+async function tryApplyTemplatesPlugin(
+  templatesPlugin: any,
+  templateFile: TFile,
+  activeView: MarkdownView | null
+) {
+  if (!templatesPlugin) {
+    return false;
+  }
+
+  const instance = templatesPlugin.instance ?? templatesPlugin;
+  const candidateFns = [
+    instance?.insertTemplate,
+    instance?.insert_template,
+    instance?.insertTemplateForFile,
+    instance?.insert_template_for_file,
+  ].filter((fn) => typeof fn === 'function');
+
+  let lastError: unknown;
+
+  for (const fn of candidateFns) {
+    try {
+      const bound = fn.bind(instance);
+
+      if (fn.length >= 2) {
+        if (activeView) {
+          await bound(templateFile, activeView);
+          return true;
+        }
+
+        await bound(templateFile, undefined);
+        return true;
+      }
+
+      if (fn.length === 1) {
+        await bound(templateFile);
+        return true;
+      }
+
+      await bound();
+      return true;
+    } catch (err) {
+      lastError = err;
+
+      if (fn.length >= 2) {
+        try {
+          const bound = fn.bind(instance);
+          await bound(templateFile);
+          return true;
+        } catch (retryError) {
+          lastError = retryError;
+        }
+      }
+    }
+  }
+
+  if (lastError) {
+    console.error('Templates plugin failed to insert template.', lastError);
+  }
+
+  return false;
+}
+
+async function tryApplyTemplaterTemplate(templaterPlugin: any, templateFile: TFile) {
+  if (!templaterPlugin) {
+    return false;
+  }
+
+  const candidateFns: Array<{ fn: (...args: any[]) => any; ctx: any }> = [];
+
+  if (typeof templaterPlugin?.append_template_to_active_file === 'function') {
+    candidateFns.push({ fn: templaterPlugin.append_template_to_active_file, ctx: templaterPlugin });
+  }
+
+  if (typeof templaterPlugin?.appendTemplateToActiveFile === 'function') {
+    candidateFns.push({ fn: templaterPlugin.appendTemplateToActiveFile, ctx: templaterPlugin });
+  }
+
+  if (typeof templaterPlugin?.templater?.append_template_to_active_file === 'function') {
+    candidateFns.push({
+      fn: templaterPlugin.templater.append_template_to_active_file,
+      ctx: templaterPlugin.templater,
+    });
+  }
+
+  if (typeof templaterPlugin?.templater?.appendTemplateToActiveFile === 'function') {
+    candidateFns.push({
+      fn: templaterPlugin.templater.appendTemplateToActiveFile,
+      ctx: templaterPlugin.templater,
+    });
+  }
+
+  let lastError: unknown;
+
+  for (const { fn, ctx } of candidateFns) {
+    try {
+      await fn.call(ctx, templateFile);
+      return true;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  if (lastError) {
+    console.error('Templater plugin failed to append template.', lastError);
+  }
+
+  return false;
+}
+
+async function waitForActiveMarkdownView(app: App, timeout = 2000, interval = 50) {
+  const start = Date.now();
+
+  let view = app.workspace.getActiveViewOfType(MarkdownView);
+
+  while (!view && Date.now() - start < timeout) {
+    await new Promise((resolve) => setTimeout(resolve, interval));
+    view = app.workspace.getActiveViewOfType(MarkdownView);
+  }
+
+  return view;
+}
+
+export async function createMarkdownFileWithFallback(
+  app: App,
+  folder: TFolder,
+  title: string
+): Promise<TFile> {
+  const fileManager = app.fileManager as any;
+
+  if (typeof fileManager?.createNewMarkdownFile === 'function') {
+    return fileManager.createNewMarkdownFile(folder, title);
+  }
+
+  if (typeof fileManager?.createMarkdownFile === 'function') {
+    return fileManager.createMarkdownFile(folder, title);
+  }
+
+  const filename = title.endsWith('.md') ? title : `${title}.md`;
+  const folderPath = folder?.path ? `${folder.path}/${filename}` : filename;
+  const normalizedPath = normalizePath(folderPath);
+
+  return app.vault.create(normalizedPath, '');
 }
 
 export function getTagColorFn(tagColors: TagColor[]) {
