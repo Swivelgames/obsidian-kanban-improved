@@ -1,6 +1,5 @@
 import update from 'immutability-helper';
-import { Content, List, Parent, Root } from 'mdast';
-import { ListItem } from 'mdast-util-from-markdown/lib';
+import type { Content, List, ListItem, Parent, Root } from 'mdast';
 import { toString } from 'mdast-util-to-string';
 import { stringifyYaml } from 'obsidian';
 import { KanbanSettings } from 'src/Settings';
@@ -44,25 +43,29 @@ import {
 } from '../helpers/parser';
 import { parseFragment } from '../parseMarkdown';
 
-interface TaskItem extends ListItem {
+type TaskItem = ListItem & {
   checkChar?: string;
-}
+};
 
 export function listItemToItemData(stateManager: StateManager, md: string, item: TaskItem) {
   const moveTags = stateManager.getSetting('move-tags');
   const moveDates = stateManager.getSetting('move-dates');
 
-  const startNode = item.children.first();
-  const endNode = item.children.last();
+  const hasChildren = item.children.length > 0;
+  const startNode = hasChildren ? (item.children[0] as Content) : undefined;
+  const endNode = hasChildren
+    ? (item.children[item.children.length - 1] as Content)
+    : undefined;
+  const isChecked = Boolean(item.checked);
 
   const start =
-    startNode.type === 'paragraph'
+    startNode && startNode.type === 'paragraph'
       ? getNodeContentBoundary(startNode).start
-      : startNode.position.start.offset;
+      : startNode?.position?.start.offset ?? item.position?.start?.offset ?? 0;
   const end =
-    endNode.type === 'paragraph'
+    endNode && endNode.type === 'paragraph'
       ? getNodeContentBoundary(endNode).end
-      : endNode.position.end.offset;
+      : endNode?.position?.end.offset ?? item.position?.end?.offset ?? start;
   const itemBoundary: ContentBoundary = { start, end };
 
   let itemContent = getStringFromBoundary(md, itemBoundary);
@@ -78,9 +81,10 @@ export function listItemToItemData(stateManager: StateManager, md: string, item:
   visit(
     item,
     ['text', 'wikilink', 'embedWikilink', 'image', 'inlineCode', 'code', 'hashtag'],
-    (node: any, i, parent) => {
+    (node: any, _index: number | undefined, parent: Parent | undefined) => {
       if (node.type === 'hashtag') {
-        if (!parent.children.first()?.value?.startsWith('```')) {
+        const firstChild = parent?.children?.[0] as any;
+        if (!firstChild?.value?.startsWith('```')) {
           titleSearch += ' #' + node.value;
         }
       } else {
@@ -106,8 +110,8 @@ export function listItemToItemData(stateManager: StateManager, md: string, item:
       fileMetadata: undefined,
       fileMetadataOrder: undefined,
     },
-    checked: item.checked,
-    checkChar: item.checked ? item.checkChar || ' ' : ' ',
+    checked: isChecked,
+    checkChar: isChecked ? item.checkChar || ' ' : ' ',
   };
 
   visit(
@@ -115,8 +119,12 @@ export function listItemToItemData(stateManager: StateManager, md: string, item:
     (node) => {
       return node.type !== 'paragraph';
     },
-    (node, i, parent) => {
+    (node, _index: number | undefined, parent: Parent | undefined) => {
       const genericNode = node as ValueNode;
+      const parentNode = parent as Parent | undefined;
+      const parentFirstChild = parentNode?.children?.[0] as any;
+      const startOffset = (node.position?.start.offset ?? itemBoundary.start) - itemBoundary.start;
+      const endOffset = (node.position?.end.offset ?? itemBoundary.start) - itemBoundary.start;
 
       if (genericNode.type === 'blockid') {
         itemData.blockId = genericNode.value;
@@ -125,7 +133,7 @@ export function listItemToItemData(stateManager: StateManager, md: string, item:
 
       if (
         genericNode.type === 'hashtag' &&
-        !(parent.children.first() as any)?.value?.startsWith('```')
+        !parentFirstChild?.value?.startsWith('```')
       ) {
         if (!itemData.metadata.tags) {
           itemData.metadata.tags = [];
@@ -135,8 +143,8 @@ export function listItemToItemData(stateManager: StateManager, md: string, item:
 
         if (moveTags) {
           title = markRangeForDeletion(title, {
-            start: node.position.start.offset - itemBoundary.start,
-            end: node.position.end.offset - itemBoundary.start,
+            start: startOffset,
+            end: endOffset,
           });
         }
         return true;
@@ -147,8 +155,8 @@ export function listItemToItemData(stateManager: StateManager, md: string, item:
 
         if (moveDates) {
           title = markRangeForDeletion(title, {
-            start: node.position.start.offset - itemBoundary.start,
-            end: node.position.end.offset - itemBoundary.start,
+            start: startOffset,
+            end: endOffset,
           });
         }
         return true;
@@ -158,8 +166,8 @@ export function listItemToItemData(stateManager: StateManager, md: string, item:
         itemData.metadata.timeStr = (genericNode as TimeNode).time;
         if (moveDates) {
           title = markRangeForDeletion(title, {
-            start: node.position.start.offset - itemBoundary.start,
-            end: node.position.end.offset - itemBoundary.start,
+            start: startOffset,
+            end: endOffset,
           });
         }
         return true;
@@ -246,7 +254,7 @@ export function astToUnhydratedBoard(
 ): Board {
   const lanes: Lane[] = [];
   const archive: Item[] = [];
-  root.children.forEach((child, index) => {
+  root.children.forEach((child: Content, index: number) => {
     if (child.type === 'heading') {
       const isArchive = isArchiveLane(child, root.children, index);
       const headingBoundary = getNodeContentBoundary(child as Parent);
@@ -275,11 +283,11 @@ export function astToUnhydratedBoard(
 
       if (isArchive && list) {
         archive.push(
-          ...(list as List).children.map((listItem) => {
+          ...(list as List).children.map((listItem: ListItem) => {
             return {
               ...ItemTemplate,
               id: generateInstanceId(),
-              data: listItemToItemData(stateManager, md, listItem),
+              data: listItemToItemData(stateManager, md, listItem as TaskItem),
             };
           })
         );
@@ -300,8 +308,8 @@ export function astToUnhydratedBoard(
       } else {
         lanes.push({
           ...LaneTemplate,
-          children: (list as List).children.map((listItem) => {
-            const data = listItemToItemData(stateManager, md, listItem);
+          children: (list as List).children.map((listItem: ListItem) => {
+            const data = listItemToItemData(stateManager, md, listItem as TaskItem);
             return {
               ...ItemTemplate,
               id: generateInstanceId(),
@@ -336,7 +344,11 @@ export function updateItemContent(stateManager: StateManager, oldItem: Item, new
   const md = `- [${oldItem.data.checkChar}] ${addBlockId(indentNewLines(newContent), oldItem)}`;
 
   const ast = parseFragment(stateManager, md);
-  const itemData = listItemToItemData(stateManager, md, (ast.children[0] as List).children[0]);
+  const itemData = listItemToItemData(
+    stateManager,
+    md,
+    (ast.children[0] as List).children[0] as TaskItem
+  );
   const newItem = update(oldItem, {
     data: {
       $set: itemData,
@@ -360,7 +372,11 @@ export function newItem(
 ) {
   const md = `- [${checkChar}] ${indentNewLines(newContent)}`;
   const ast = parseFragment(stateManager, md);
-  const itemData = listItemToItemData(stateManager, md, (ast.children[0] as List).children[0]);
+  const itemData = listItemToItemData(
+    stateManager,
+    md,
+    (ast.children[0] as List).children[0] as TaskItem
+  );
 
   itemData.forceEditMode = !!forceEdit;
 
