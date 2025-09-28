@@ -7,7 +7,12 @@ import { moveEntity } from 'src/dnd/util/data';
 import { t } from 'src/lang/helpers';
 
 import { BoardModifiers } from '../../helpers/boardModifiers';
-import { applyTemplate, escapeRegExpStr, generateInstanceId } from '../helpers';
+import {
+  applyTemplate,
+  createMarkdownFileWithFallback,
+  escapeRegExpStr,
+  generateInstanceId,
+} from '../helpers';
 import { EditState, Item } from '../types';
 import {
   constructDatePicker,
@@ -72,7 +77,8 @@ export function useItemMenu({
                 ? (stateManager.app.vault.getAbstractFileByPath(newNoteFolder as string) as TFolder)
                 : stateManager.app.fileManager.getNewFileParent(stateManager.file.path);
 
-              const newFile = (await (stateManager.app.fileManager as any).createNewMarkdownFile(
+              const newFile = (await createMarkdownFileWithFallback(
+                stateManager.app,
                 targetFolder,
                 sanitizedTitle
               )) as TFile;
