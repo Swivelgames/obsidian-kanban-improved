@@ -155,7 +155,7 @@ export function MetadataValue({ data, dateLabel, searchQuery }: MetadataValuePro
     const link = getLinkFromObj(v, view);
     const date = getDate(v);
     const str = anyToString(v, stateManager);
-    const isMatch = searchQuery && str.toLocaleLowerCase().contains(searchQuery);
+    const isMatch = searchQuery && str.toLocaleLowerCase().includes(searchQuery);
 
     let content: ComponentChild;
     if (link || data.containsMarkdown) {
@@ -236,7 +236,7 @@ export const MetadataTable = memo(function MetadataTable({
           const data = metadata[k];
           if (!data) return null;
 
-          const isSearchMatch = (data.label || k).toLocaleLowerCase().contains(searchQuery);
+          const isSearchMatch = (data.label || k).toLocaleLowerCase().includes(searchQuery);
           return (
             <tr key={k} className={c('meta-row')}>
               {!data.shouldHideLabel && (

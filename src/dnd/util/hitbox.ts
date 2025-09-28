@@ -284,7 +284,7 @@ export function getBestIntersect(
     const entityHitbox = entity.getHitbox();
     const entityCenter = centerOfRectangle(entityHitbox);
 
-    if (isDropArea && !isDropArea.contains(dragEntity.getData().type)) {
+    if (isDropArea && !isDropArea.includes(dragEntity.getData().type)) {
       return distanceBetween(dragCenter, entityCenter);
     }
 
